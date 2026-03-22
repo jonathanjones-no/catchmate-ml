@@ -1,10 +1,28 @@
 """FastAPI service for CatchMate ML recommendation system."""
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
+from .config import settings
 from .train import train_model
 from .predict import predict_all_pairs, get_latest_model_path
 
-app = FastAPI(title="CatchMate ML", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Validate required config on startup."""
+    missing = []
+    if not settings.database_url.get_secret_value():
+        missing.append("DATABASE_URL")
+    if not settings.supabase_url:
+        missing.append("SUPABASE_URL")
+    if not settings.supabase_service_key.get_secret_value():
+        missing.append("SUPABASE_SERVICE_KEY")
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+    yield
+
+
+app = FastAPI(title="CatchMate ML", version="0.1.0", lifespan=lifespan)
 
 
 @app.get("/health")
