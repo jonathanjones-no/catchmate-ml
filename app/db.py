@@ -6,7 +6,7 @@ from .config import settings
 
 
 def get_connection():
-    return psycopg2.connect(settings.database_url)
+    return psycopg2.connect(settings.database_url.get_secret_value())
 
 
 def fetch_training_data():

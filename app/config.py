@@ -1,10 +1,11 @@
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     supabase_url: str = ""
-    supabase_service_key: str = ""
-    database_url: str = ""
+    supabase_service_key: SecretStr = SecretStr("")
+    database_url: SecretStr = SecretStr("")
     model_dir: str = "./checkpoints"
     embedding_dim: int = 32
     batch_size: int = 256
