@@ -14,6 +14,9 @@ def build_user_index(users: list[dict]) -> dict:
     return {u["id"]: i + 1 for i, u in enumerate(users)}  # 0 reserved for padding
 
 
+NUM_FEATURES = 12
+
+
 def build_feature_vector(user: dict) -> list[float]:
     """Convert user dict to a fixed-size feature vector."""
     return [
@@ -22,9 +25,13 @@ def build_feature_vector(user: dict) -> list[float]:
         1.0 if user.get("has_bio") else 0.0,
         min(len(user.get("sport_types") or []) / 5.0, 1.0),  # sport count normalized
         min((user.get("age") or 25) / 40.0, 1.0),  # age normalized
-        user.get("location_lat", 39.7) / 90.0,  # lat normalized
-        (user.get("location_lng", -105.0) + 180.0) / 360.0,  # lng normalized
-        max(0, 1.0 - (user.get("days_old") or 0) / 30.0),  # recency
+        (user.get("lat") or 39.7) / 90.0,  # lat normalized (from PostGIS)
+        ((user.get("lng") or -105.0) + 180.0) / 360.0,  # lng normalized
+        max(0, 1.0 - (user.get("days_old") or 0) / 30.0),  # account recency
+        max(0, 1.0 - (user.get("days_inactive") or 0) / 30.0),  # activity recency
+        min((user.get("intrinsic_base") or 0) / 100.0, 1.0),  # pre-computed intrinsic
+        min((user.get("initiative") or 0), 1.0),  # pre-computed initiative
+        min((user.get("total_interactions") or 0) / 50.0, 1.0),  # interaction count normalized
     ]
 
 
@@ -44,14 +51,14 @@ def prepare_training_pairs(data: dict, user_index: dict, user_features: dict):
             # Both directions are positive
             viewers.append(user_index[u1])
             candidates.append(user_index[u2])
-            v_feats.append(user_features.get(u1, [0.0] * 8))
-            c_feats.append(user_features.get(u2, [0.0] * 8))
+            v_feats.append(user_features.get(u1, [0.0] * NUM_FEATURES))
+            c_feats.append(user_features.get(u2, [0.0] * NUM_FEATURES))
             labels.append(1.0)
 
             viewers.append(user_index[u2])
             candidates.append(user_index[u1])
-            v_feats.append(user_features.get(u2, [0.0] * 8))
-            c_feats.append(user_features.get(u1, [0.0] * 8))
+            v_feats.append(user_features.get(u2, [0.0] * NUM_FEATURES))
+            c_feats.append(user_features.get(u1, [0.0] * NUM_FEATURES))
             labels.append(1.0)
 
     # Negative pairs from left swipes
@@ -62,8 +69,8 @@ def prepare_training_pairs(data: dict, user_index: dict, user_features: dict):
             if s in user_index and d in user_index:
                 viewers.append(user_index[s])
                 candidates.append(user_index[d])
-                v_feats.append(user_features.get(s, [0.0] * 8))
-                c_feats.append(user_features.get(d, [0.0] * 8))
+                v_feats.append(user_features.get(s, [0.0] * NUM_FEATURES))
+                c_feats.append(user_features.get(d, [0.0] * NUM_FEATURES))
                 labels.append(0.0)
 
     return {
@@ -106,7 +113,7 @@ def train_model(epochs: int = 50) -> dict:
     model = TrainingModel(
         num_users=num_users,
         embedding_dim=settings.embedding_dim,
-        num_features=8,
+        num_features=NUM_FEATURES,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=settings.learning_rate)
 
@@ -154,7 +161,7 @@ def train_model(epochs: int = 50) -> dict:
     inference_model = InferenceModel(
         num_users=num_users,
         embedding_dim=settings.embedding_dim,
-        num_features=8,
+        num_features=NUM_FEATURES,
     )
     load_training_weights_into_inference(inference_model, model.state_dict())
 

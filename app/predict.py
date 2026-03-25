@@ -6,7 +6,7 @@ import torch
 from .config import settings
 from .db import fetch_eligible_pairs, write_pair_scores, get_connection
 from .models.recommender import InferenceModel
-from .train import build_feature_vector
+from .train import build_feature_vector, NUM_FEATURES
 
 
 def get_latest_model_path() -> str | None:
@@ -31,7 +31,7 @@ def predict_all_pairs() -> dict:
     model = InferenceModel(
         num_users=checkpoint["num_users"],
         embedding_dim=checkpoint["embedding_dim"],
-        num_features=8,
+        num_features=NUM_FEATURES,
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
@@ -50,11 +50,17 @@ def predict_all_pairs() -> dict:
                 SELECT u.id, u.sport_types, u.age, u.is_verified,
                        u.photo_url IS NOT NULL as has_photo,
                        u.bio IS NOT NULL AND u.bio != '' as has_bio,
-                       u.location_lat, u.location_lng,
-                       EXTRACT(EPOCH FROM (now() - a.created_at)) / 86400 as days_old
+                       ST_Y(u.location::geometry) as lat,
+                       ST_X(u.location::geometry) as lng,
+                       EXTRACT(EPOCH FROM (now() - u.created_at)) / 86400 as days_old,
+                       EXTRACT(EPOCH FROM (now() - u.last_active_at)) / 86400 as days_inactive,
+                       COALESCE(uis.intrinsic_base, 0) as intrinsic_base,
+                       COALESCE(uis.initiative, 0) as initiative,
+                       COALESCE(uis.total_interactions, 0) as total_interactions
                 FROM public.users u
-                JOIN auth.users a ON a.id = u.id
+                LEFT JOIN public.user_intrinsic_scores uis ON uis.user_id = u.id
                 WHERE u.first_name IS NOT NULL AND u.first_name != ''
+                  AND u.is_test_account = false
             """)
             for row in cur.fetchall():
                 user_features_map[row["id"]] = build_feature_vector(row)
@@ -63,7 +69,7 @@ def predict_all_pairs() -> dict:
 
     # Batch predict
     scores = []
-    default_features = [0.0] * 8
+    default_features = [0.0] * NUM_FEATURES
     batch_size = 1024
 
     with torch.no_grad():

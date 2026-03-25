@@ -23,16 +23,22 @@ def fetch_training_data():
             """)
             swipes = cur.fetchall()
 
-            # User features
+            # User features — join pre-computed intrinsic scores
             cur.execute("""
                 SELECT u.id, u.sport_types, u.age, u.is_verified,
                        u.photo_url IS NOT NULL as has_photo,
                        u.bio IS NOT NULL AND u.bio != '' as has_bio,
-                       u.location_lat, u.location_lng,
-                       EXTRACT(EPOCH FROM (now() - a.created_at)) / 86400 as days_old
+                       ST_Y(u.location::geometry) as lat,
+                       ST_X(u.location::geometry) as lng,
+                       EXTRACT(EPOCH FROM (now() - u.created_at)) / 86400 as days_old,
+                       EXTRACT(EPOCH FROM (now() - u.last_active_at)) / 86400 as days_inactive,
+                       COALESCE(uis.intrinsic_base, 0) as intrinsic_base,
+                       COALESCE(uis.initiative, 0) as initiative,
+                       COALESCE(uis.total_interactions, 0) as total_interactions
                 FROM public.users u
-                JOIN auth.users a ON a.id = u.id
+                LEFT JOIN public.user_intrinsic_scores uis ON uis.user_id = u.id
                 WHERE u.first_name IS NOT NULL AND u.first_name != ''
+                  AND u.is_test_account = false
             """)
             users = cur.fetchall()
 
@@ -75,6 +81,8 @@ def fetch_eligible_pairs(max_distance_miles: int = 100):
                 WHERE a.id != b.id
                   AND a.first_name IS NOT NULL AND a.first_name != ''
                   AND b.first_name IS NOT NULL AND b.first_name != ''
+                  AND a.is_test_account = false
+                  AND b.is_test_account = false
                   AND a.location IS NOT NULL
                   AND b.location IS NOT NULL
                   AND ST_DWithin(a.location, b.location, %s * 1609.344)
