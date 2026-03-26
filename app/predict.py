@@ -4,7 +4,7 @@ import os
 import glob
 import torch
 from .config import settings
-from .db import fetch_eligible_pairs, write_pair_scores, get_connection
+from .db import fetch_eligible_pairs, write_pair_scores, get_connection, fetch_behavioral_signals
 from .models.recommender import InferenceModel
 from .train import build_feature_vector, NUM_FEATURES
 
@@ -41,7 +41,8 @@ def predict_all_pairs() -> dict:
     if not pairs:
         return {"status": "skipped", "reason": "no eligible pairs"}
 
-    # Refresh user features from DB for any new users
+    # Refresh user features from DB + BigQuery behavioral signals
+    behavioral_signals = fetch_behavioral_signals()
     conn = get_connection()
     try:
         import psycopg2.extras
@@ -63,7 +64,9 @@ def predict_all_pairs() -> dict:
                   AND u.is_test_account = false
             """)
             for row in cur.fetchall():
-                user_features_map[row["id"]] = build_feature_vector(row)
+                user_features_map[row["id"]] = build_feature_vector(
+                    row, behavioral_signals.get(row["id"])
+                )
     finally:
         conn.close()
 

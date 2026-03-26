@@ -1,5 +1,9 @@
 """Database connection and data fetching for training/prediction."""
 
+import base64
+import json
+import tempfile
+import os
 import psycopg2
 import psycopg2.extras
 from .config import settings
@@ -90,6 +94,112 @@ def fetch_eligible_pairs(max_distance_miles: int = 100):
             return cur.fetchall()
     finally:
         conn.close()
+
+
+def fetch_behavioral_signals() -> dict[str, dict]:
+    """Fetch per-user behavioral signals from BigQuery analytics events.
+
+    Returns a dict of user_id → behavioral features:
+    - avg_swipe_time: average seconds between card_impression and swipe
+    - right_swipe_rate: fraction of right swipes
+    - sessions_per_day: average sessions per active day
+    - avg_message_length: average chat message length
+    - chat_response_rate: fraction of matches where user sent a message
+    """
+    creds_b64 = settings.google_bigquery_credentials_b64.get_secret_value()
+    if not creds_b64:
+        return {}
+
+    try:
+        from google.cloud import bigquery
+        from google.oauth2 import service_account
+
+        creds_json = json.loads(base64.b64decode(creds_b64))
+
+        # Write to temp file (google SDK needs a file path)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(creds_json, f)
+            creds_path = f.name
+
+        try:
+            credentials = service_account.Credentials.from_service_account_file(creds_path)
+            client = bigquery.Client(
+                project=settings.bigquery_project,
+                credentials=credentials,
+            )
+
+            query = f"""
+            WITH swipe_timing AS (
+                -- Average time between seeing a card and swiping
+                SELECT
+                    imp.user_id,
+                    AVG(TIMESTAMP_DIFF(sw.created_at, imp.created_at, SECOND)) as avg_swipe_seconds
+                FROM `{settings.bigquery_project}.{settings.bigquery_dataset}.events` imp
+                JOIN `{settings.bigquery_project}.{settings.bigquery_dataset}.events` sw
+                    ON imp.user_id = sw.user_id
+                    AND imp.event_name = 'card_impression'
+                    AND sw.event_name = 'discover_swipe'
+                    AND JSON_EXTRACT_SCALAR(imp.properties, '$.candidate_id') = JSON_EXTRACT_SCALAR(sw.properties, '$.profile_id')
+                WHERE imp.created_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+                GROUP BY imp.user_id
+            ),
+            swipe_direction AS (
+                SELECT
+                    user_id,
+                    COUNTIF(JSON_EXTRACT_SCALAR(properties, '$.direction') = 'right') / GREATEST(COUNT(*), 1) as right_swipe_rate,
+                    COUNT(*) as total_swipes
+                FROM `{settings.bigquery_project}.{settings.bigquery_dataset}.events`
+                WHERE event_name = 'discover_swipe'
+                    AND created_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+                GROUP BY user_id
+            ),
+            session_activity AS (
+                SELECT
+                    user_id,
+                    COUNT(DISTINCT session_id) / GREATEST(COUNT(DISTINCT DATE(created_at)), 1) as sessions_per_day
+                FROM `{settings.bigquery_project}.{settings.bigquery_dataset}.events`
+                WHERE created_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+                GROUP BY user_id
+            ),
+            chat_activity AS (
+                SELECT
+                    user_id,
+                    AVG(CAST(JSON_EXTRACT_SCALAR(properties, '$.message_length') AS FLOAT64)) as avg_message_length
+                FROM `{settings.bigquery_project}.{settings.bigquery_dataset}.events`
+                WHERE event_name = 'chat_message_sent'
+                    AND created_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+                GROUP BY user_id
+            )
+            SELECT
+                COALESCE(sd.user_id, sa.user_id, ca.user_id) as user_id,
+                COALESCE(st.avg_swipe_seconds, 0) as avg_swipe_time,
+                COALESCE(sd.right_swipe_rate, 0.5) as right_swipe_rate,
+                COALESCE(sd.total_swipes, 0) as total_swipes,
+                COALESCE(sa.sessions_per_day, 0) as sessions_per_day,
+                COALESCE(ca.avg_message_length, 0) as avg_message_length
+            FROM swipe_direction sd
+            FULL OUTER JOIN swipe_timing st ON sd.user_id = st.user_id
+            FULL OUTER JOIN session_activity sa ON sd.user_id = sa.user_id
+            FULL OUTER JOIN chat_activity ca ON sd.user_id = ca.user_id
+            """
+
+            results = client.query(query).result()
+
+            signals = {}
+            for row in results:
+                signals[row.user_id] = {
+                    "avg_swipe_time": float(row.avg_swipe_time or 0),
+                    "right_swipe_rate": float(row.right_swipe_rate or 0.5),
+                    "total_swipes": int(row.total_swipes or 0),
+                    "sessions_per_day": float(row.sessions_per_day or 0),
+                    "avg_message_length": float(row.avg_message_length or 0),
+                }
+            return signals
+        finally:
+            os.unlink(creds_path)
+    except Exception as e:
+        print(f"[BigQuery] Failed to fetch behavioral signals: {e}")
+        return {}
 
 
 def write_pair_scores(scores: list[dict]):

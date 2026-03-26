@@ -5,7 +5,7 @@ import time
 import torch
 import numpy as np
 from .config import settings
-from .db import fetch_training_data
+from .db import fetch_training_data, fetch_behavioral_signals
 from .models.recommender import TrainingModel, InferenceModel, load_training_weights_into_inference
 
 
@@ -14,12 +14,14 @@ def build_user_index(users: list[dict]) -> dict:
     return {u["id"]: i + 1 for i, u in enumerate(users)}  # 0 reserved for padding
 
 
-NUM_FEATURES = 12
+NUM_FEATURES = 17
 
 
-def build_feature_vector(user: dict) -> list[float]:
-    """Convert user dict to a fixed-size feature vector."""
+def build_feature_vector(user: dict, behavioral: dict | None = None) -> list[float]:
+    """Convert user dict + behavioral signals to a fixed-size feature vector."""
+    b = behavioral or {}
     return [
+        # Static profile features (12)
         1.0 if user.get("is_verified") else 0.0,
         1.0 if user.get("has_photo") else 0.0,
         1.0 if user.get("has_bio") else 0.0,
@@ -32,6 +34,12 @@ def build_feature_vector(user: dict) -> list[float]:
         min((user.get("intrinsic_base") or 0) / 100.0, 1.0),  # pre-computed intrinsic
         min((user.get("initiative") or 0), 1.0),  # pre-computed initiative
         min((user.get("total_interactions") or 0) / 50.0, 1.0),  # interaction count normalized
+        # Behavioral signals from BigQuery (5)
+        min(b.get("avg_swipe_time", 0) / 10.0, 1.0),  # avg seconds viewing card, capped at 10s
+        b.get("right_swipe_rate", 0.5),  # fraction of right swipes (0-1)
+        min(b.get("total_swipes", 0) / 100.0, 1.0),  # total swipes normalized
+        min(b.get("sessions_per_day", 0) / 5.0, 1.0),  # sessions per day normalized
+        min(b.get("avg_message_length", 0) / 200.0, 1.0),  # avg message length normalized
     ]
 
 
@@ -98,9 +106,16 @@ def train_model(epochs: int = 50) -> dict:
             "swipes": len(data["swipes"]),
         }
 
+    # Fetch behavioral signals from BigQuery (gracefully degrades if unavailable)
+    behavioral_signals = fetch_behavioral_signals()
+    print(f"[train] Behavioral signals loaded for {len(behavioral_signals)} users")
+
     # Build indices and features
     user_index = build_user_index(users)
-    user_features = {u["id"]: build_feature_vector(u) for u in users}
+    user_features = {
+        u["id"]: build_feature_vector(u, behavioral_signals.get(u["id"]))
+        for u in users
+    }
 
     # Prepare training data
     pairs = prepare_training_pairs(data, user_index, user_features)
